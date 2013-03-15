@@ -1,7 +1,6 @@
 dynamo-cli
 ==========
 
-<pre>
 usage: dynamo-cli [-h] [-c COLUMNS] [-C] [-cf CREDFILE] [-f FILE] [-i ID]
                   [-k KEY] [-H HASH] -t TABLE [-T] [-R READ] [-W WRITE]
 
@@ -30,7 +29,6 @@ optional arguments:
   -W WRITE, --write WRITE
                         How many write capacity units if in --throttle mode.
                         The default value of 0 means "leave unchanged"
-</pre>
 
 dynamo-cli does two things right now. It uploads files (tab-delimited, first line discarded) to a dynamodb table.
 It also will change read and write capacity for an existing dynamo table.
@@ -50,8 +48,8 @@ The dynamo table must already exist.
 ```./dynamo-cli -t people-match -cf ~/.aws/credentials -T -R 200 -W 8000```
 
 AWS credentials may be specified on the command-line, may be in a file, or may be environment variables.
-<pre>
-"""Command line flags have priority, followed by credentials in a file,
+
+    """Command line flags have priority, followed by credentials in a file,
     followed by environment variables.
 
     --id abcde --key 12345
@@ -63,4 +61,3 @@ AWS credentials may be specified on the command-line, may be in a file, or may b
     export AWSAccessKeyId=abcde
     export AWSSecretKey=12345
     """
-</pre>

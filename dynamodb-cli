@@ -1,0 +1,249 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import gevent
+from gevent import monkey; monkey.patch_all(thread=False)
+
+from itertools import izip, izip_longest
+
+from boto.exception import BotoServerError
+from boto.dynamodb.exceptions import DynamoDBValidationError
+
+from utils import utils
+
+import json
+import logging
+import math
+import os
+import random
+import subprocess
+import sys
+import time
+
+import argparse
+import boto.dynamodb
+import gevent.pool
+import gevent.queue
+#import ipdb
+
+
+BATCHSIZE = 25                                 # This is the max for DynamoDB's batch update
+
+datalogger = logging.getLogger('validation-errors')
+logger = logging.getLogger('dynamo-cli')
+logger.setLevel(logging.INFO)
+
+dfh = logging.FileHandler('validation-errors.log')
+dfh.setLevel(logging.INFO)
+
+fh = logging.FileHandler('dynamo-cli.log')
+fh.setLevel(logging.INFO)
+
+ch = logging.StreamHandler()
+ch.setLevel(logging.ERROR)
+
+formatter = logging.Formatter('%(message)s')
+dfh.setFormatter(formatter)
+fh.setFormatter(formatter)
+ch.setFormatter(formatter)
+datalogger.addHandler(dfh)
+logger.addHandler(fh)
+logger.addHandler(ch)
+
+
+def pool_single_responses(table, conn, batch):
+    """If get_batch_response fails then retry each item in the batch individually."""
+    greenlets = []
+    pool = gevent.pool.Pool()
+    mytable = table
+    for bwrite in batch:
+        mydata = bwrite.to_dict()
+        for row in mydata[1]:
+            record = row['PutRequest']['Item']
+       	    hkey = int(record['personid']['N'])
+            del(record['personid'])
+
+            # Unwrapping the dynamo Batch Item gives us strings instead of Nums
+            typed_attrs = {}
+	    raw_attrs = dict(zip(record.keys(), [ unicode(x.values()[0], errors='replace') for x in record.values() ]))
+            for k, v in raw_attrs.items():
+                    k = k.strip()
+                    v = v.strip()
+		    try:
+			numeric_diff = float(v) - math.floor(float(v))
+                        if k == "street_number" or k == "dma_id":
+                            typed_attrs[k] = str(v)
+			elif numeric_diff == 0.0:
+			    typed_attrs[k] = int(float(v))
+			elif numeric_diff > 0.0:
+			    typed_attrs[k] = float(v)
+			else:
+			    typed_attrs[k] = v
+		    except ValueError:
+			typed_attrs[k] = v
+            record = mytable.new_item(
+	        hash_key = hkey,
+	        attrs = typed_attrs
+                )
+            greenlets.append( pool.spawn(get_single_response, record))
+            #logger.info("pooled %s" % record)
+    logger.info("running single response greenlets") 
+    gevent.joinall(greenlets)
+
+
+def get_single_response(record):
+    try:
+	record.put()
+	logger.info("%s written" % record)
+	return None
+    except UnicodeDecodeError, e:
+	logger.error(e)
+	s = json.dumps(record, sort_keys=True, indent=4)
+	datalogger.error( "%s" % '\n'.join([l.rstrip() for l in s.splitlines()]) )
+	return None
+    except DynamoDBValidationError, e:
+	logger.error(e)
+	s = json.dumps(record, sort_keys=True, indent=4) 
+	datalogger.error( "%s" % '\n'.join([l.rstrip() for l in s.splitlines()]) )
+	return None
+
+
+def get_batch_response(table, conn, batch):
+    """Do a batchwrite to dynamodb. If we're being throttled because we've
+    exceeded our write capacity, Dynamo will return a BotoServerError. In that
+    case, just sleep for 0-10 seconds and try again...and again...and
+    again..."""
+    mytable = table
+    try:
+        dynresponse = conn.batch_write_item(batch)
+        return dynresponse
+    except UnicodeDecodeError, e:
+        return pool_single_responses(mytable, conn, batch)
+    except DynamoDBValidationError, e:
+        return pool_single_responses(mytable, conn, batch)
+    except BotoServerError, e:
+        logger.info( e)
+        duration = random.randint(1, 10)
+        logger.info("sleeping %d seconds" % duration)
+        time.sleep(duration)
+        return get_batch_response(mytable, conn, batch)
+	
+
+def submit_batch(mytable, conn, queue):
+    while True:
+        batch = queue.get()
+        logger.info("%s grabbed a work item: qsize: %s" % (os.getpid(), queue.qsize()))
+        #ipdb.set_trace()
+        starttime = time.time()
+        try:
+	    response = get_batch_response(mytable, conn, batch)
+	    if not response:
+	        continue
+	    unprocessed = response.get('UnprocessedItems', None)
+	    if not unprocessed:
+                elapsedtime = time.time() - starttime
+                logger.info("%s completed work in %s" % (os.getpid(), elapsedtime))
+                queue.task_done()
+                gevent.sleep(0)
+                continue
+	    else:
+	        logger.debug("%d items for %s not processed" % (len(unprocessed), batch))
+	    batch = conn.new_batch_write_list()
+	    unprocessed_list = unprocessed[mytable._dict['TableName']]
+	    batch_items = []
+	    for u in unprocessed_list:
+	        item_attr = u['PutRequest']['Item']
+	        item = mytable.new_item(
+		    attrs=item_attr
+	        )
+	        batch_items.append(item)
+	    batch.add_batch(mytable, puts=batch_items)
+        except Exception, e:
+            logger.info(e)
+
+
+def dynamoit(filename, dynamo_cols, key, queue, conn, mytable):
+    with open(filename, 'r') as f:
+        """Discard first 17 lines...new query formats break this"""
+	discard = [ f.next() for x in xrange(17) ]
+
+        logger.info("Started reading from %s" % filename)
+        # Get a tuple of BATCHSIZE lines
+        for lines in izip_longest(*[f] * BATCHSIZE):
+            batch = conn.new_batch_write_list()
+            batch_items = []
+            for line in lines:
+                if line:
+                    # File delimiter is at the right of the next line
+                    raw_data = dict((izip(dynamo_cols, line.strip().split('\t'))))
+                    data = {}
+                    for k, v in raw_data.items():
+                        if v:               # No empty attributes in DynamoDB
+                            try:
+                                numeric_diff = float(v) - math.floor(float(v))
+                                if k == "street_number" == "dma_id":
+                                    data[k] = str(v)
+                                elif numeric_diff == 0.0:
+                                    data[k] = int(float(v))
+                                elif numeric_diff > 0.0:
+                                    data[k] = float(v)
+                                else:
+                                    data[k] = v
+                            except ValueError:
+                                data[k] = v
+                    batch_items.append(mytable.new_item(hash_key=(data[key]), attrs=data))
+            batch.add_batch(mytable, puts=batch_items)
+            gevent.sleep(0)
+            queue.put(batch)
+            logger.info("%s added to queue: size: %s" % (os.getpid(), queue.qsize()))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-c', '--columns', help='An unquoted, comma-delimited list of dynamo column headers (personid, first_name)')
+    parser.add_argument('-C', '--header', action='store_true', help='Indicates that the first line of the tab-delimnited file contains column names. --columns will override this flag')
+    parser.add_argument('-cf', '--credfile', help='File containing AWS credentials. Contains 2 lines like AWSAccessKeyId=ABCDE\nAWSSecretKey=12345\n')
+    parser.add_argument('-f', '--file', help='The input filename; the first line is discarded; the remainder is expected to be tab-delimited')
+    parser.add_argument('-i', '--id', help='AWS Access Key ID')
+    parser.add_argument('-k', '--key', help='AWS Secret Key')
+    parser.add_argument('-H', '--hash', help='DynamoDB hash key')
+    parser.add_argument('-t', '--table', help='DynamoDB table name', required=True)
+    parser.add_argument('-T', '--throttle', action='store_true', help='Alter table capcaity. See --read and --write. All other actions ignored!')
+    parser.add_argument('-R', '--read', help='How many read capacity units if in --throttle mode.)
+    parser.add_argument('-W', '--write', help='How many write capacity units if in --throttle mode.)
+    args = parser.parse_args()
+
+    AWSAccessKeyId, AWSSecretKey = utils.aws_authentication(args)
+    table = args.table
+
+    if args.throttle:
+        logger.info("Updating %s to %s read capacity and %s write capcity"
+                % (table, args.read, args.write))
+        myconn, mytable = utils.get_table(table, AWSAccessKeyId, AWSSecretKey)
+        utils.alter_capacity(table, int(args.read), int(args.write),
+                AWSAccessKeyId, AWSSecretKey)
+        sys.exit(0)
+
+    if not args.throttle and not args.file:
+        print >> sys.stdout, "Since we're not updating table capacity, I need a file to import"
+        sys.exit(1)
+
+    if args.header and not args.columns:
+        with open(file, 'r') as f:
+            dynamo_cols = f.readline().rstrip().split('\t')
+
+    if not args.columns:
+        print >> sys.stdout, "I need some column headers. See --columns"
+    else:
+        dynamo_cols = args.columns.split(',')
+        
+        
+    myconn, mytable = utils.get_table(table, AWSAccessKeyId, AWSSecretKey)
+    # This is typically run on an AWS cc.8xl machine so 32 "cores"
+    queue = gevent.queue.JoinableQueue(512)
+    pool = gevent.pool.Pool(1024)
+    pool.spawn(submit_batch, mytable, myconn, queue)
+    pool.spawn(submit_batch, mytable, myconn, queue)
+    
+    dynamoit(args.file, dynamo_cols, args.hash, queue, myconn, mytable)
+    queue.join()

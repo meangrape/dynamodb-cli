@@ -162,10 +162,10 @@ def submit_batch(mytable, conn, queue):
             logger.info(e)
 
 
-def dynamoit(filename, dynamo_cols, key, queue, conn, mytable):
+def dynamoit(filename, key, queue, conn, mytable, dynamo_cols=None):
     with open(filename, 'r') as f:
-        """Discard first 17 lines...new query formats break this"""
-	discard = [ f.next() for x in xrange(17) ]
+        if not dynamo_cols:
+            dynamo_cols = f.readline().rstrip().split('\t')
 
         logger.info("Started reading from %s" % filename)
         # Get a tuple of BATCHSIZE lines
@@ -174,11 +174,11 @@ def dynamoit(filename, dynamo_cols, key, queue, conn, mytable):
             batch_items = []
             for line in lines:
                 if line:
-                    # File delimiter is at the right of the next line
+                    # File delimiter we're looking for is at the right of the next line
                     raw_data = dict((izip(dynamo_cols, line.strip().split('\t'))))
                     data = {}
                     for k, v in raw_data.items():
-                        if v:               # No empty attributes in DynamoDB
+                        if v:               # No empty attributes allowed by DynamoDB
                             try:
                                 numeric_diff = float(v) - math.floor(float(v))
                                 if k == "street_number" == "dma_id":
@@ -200,8 +200,7 @@ def dynamoit(filename, dynamo_cols, key, queue, conn, mytable):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--columns', help='An unquoted, comma-delimited list of dynamo column headers (personid, first_name)')
-    parser.add_argument('-C', '--header', action='store_true', help='Indicates that the first line of the tab-delimnited file contains column names. --columns will override this flag')
+    parser.add_argument('-c', '--columns', help='An unquoted, comma-delimited list of dynamo column headers (personid, first_name); otherwise we assume the first line of the file contains column headers)
     parser.add_argument('-cf', '--credfile', help='File containing AWS credentials. Contains 2 lines like AWSAccessKeyId=ABCDE\nAWSSecretKey=12345\n')
     parser.add_argument('-f', '--file', help='The input filename; the first line is discarded; the remainder is expected to be tab-delimited')
     parser.add_argument('-i', '--id', help='AWS Access Key ID')
@@ -228,14 +227,8 @@ if __name__ == "__main__":
         print >> sys.stdout, "Since we're not updating table capacity, I need a file to import"
         sys.exit(1)
 
-    if args.header and not args.columns:
-        with open(file, 'r') as f:
-            dynamo_cols = f.readline().rstrip().split('\t')
-
-    if not args.columns:
-        print >> sys.stdout, "I need some column headers. See --columns"
-    else:
-        dynamo_cols = args.columns.split(',')
+    if args.columns:
+       dynamo_cols = args.columns.split(',')
         
         
     myconn, mytable = utils.get_table(table, AWSAccessKeyId, AWSSecretKey)

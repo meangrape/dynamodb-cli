@@ -208,8 +208,8 @@ if __name__ == "__main__":
     parser.add_argument('-H', '--hash', help='DynamoDB hash key')
     parser.add_argument('-t', '--table', help='DynamoDB table name', required=True)
     parser.add_argument('-T', '--throttle', action='store_true', help='Alter table capcaity. See --read and --write. All other actions ignored!')
-    parser.add_argument('-R', '--read', help='How many read capacity units if in --throttle mode.)
-    parser.add_argument('-W', '--write', help='How many write capacity units if in --throttle mode.)
+    parser.add_argument('-R', '--read', help='How many read capacity units if in --throttle mode.')
+    parser.add_argument('-W', '--write', help='How many write capacity units if in --throttle mode.')
     args = parser.parse_args()
 
     AWSAccessKeyId, AWSSecretKey = utils.aws_authentication(args)

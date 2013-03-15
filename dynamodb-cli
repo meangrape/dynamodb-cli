@@ -200,7 +200,7 @@ def dynamoit(filename, key, queue, conn, mytable, dynamo_cols=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--columns', help='An unquoted, comma-delimited list of dynamo column headers (personid, first_name); otherwise we assume the first line of the file contains column headers)
+    parser.add_argument('-c', '--columns', help='An unquoted, comma-delimited list of dynamo column headers (personid, first_name); otherwise we assume the first line of the file contains column headers')
     parser.add_argument('-cf', '--credfile', help='File containing AWS credentials. Contains 2 lines like AWSAccessKeyId=ABCDE\nAWSSecretKey=12345\n')
     parser.add_argument('-f', '--file', help='The input filename; the first line is discarded; the remainder is expected to be tab-delimited')
     parser.add_argument('-i', '--id', help='AWS Access Key ID')
